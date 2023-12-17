@@ -9,53 +9,26 @@ import (
 var modulus = new(big.Int).Exp(big.NewInt(2), big.NewInt(256), nil)
 
 // Evm executes the EVM code and returns the stack and a success indicator.
-// TODO: Reduce cognitive complexity
 func Evm(code []byte) ([]*big.Int, bool) {
 	var stack []*big.Int
 	pc := 0
 
 	for pc < len(code) {
 		opcode, err := NewOpCode(code[pc])
+
 		if err != nil {
 			return nil, false // Revert on unknown opcode
 		}
+
 		pc++
 
-		switch opcode {
-		case Stop:
+		// Stop execution if the opcode is STOP
+		if opcode == Stop {
 			return stack, true // Halt execution
-		case Push0:
-			stack = append(stack, big.NewInt(0)) // Push 0 onto the stack
-		case Push1:
-			pushX(&pc, &stack, code, 1)
-		case Push2:
-			pushX(&pc, &stack, code, 2)
-		case Push4:
-			pushX(&pc, &stack, code, 4)
-		case Push6:
-			pushX(&pc, &stack, code, 6)
-		case Push10:
-			pushX(&pc, &stack, code, 10)
-		case Push11:
-			pushX(&pc, &stack, code, 11)
-		case Push32:
-			pushX(&pc, &stack, code, 32)
-		case Pop:
-			if _, ok := popX(&pc, &stack, 1); !ok {
-				return nil, false
-			}
-		case Add, Sub, Mul, Div, Mod, Addmod, Mulmod, Exp:
-			if !applyArithmeticOp(opcode, &pc, &stack) {
-				return nil, false
-			}
-		case Signextend:
-			if !signExtend(&pc, &stack) {
-				return nil, false
-			}
-		case Sdiv:
-			if !sdiv(&pc, &stack) {
-				return nil, false
-			}
+		}
+
+		if !executeOpcode(&pc, &stack, code, opcode) {
+			return nil, false
 		}
 	}
 
@@ -63,6 +36,43 @@ func Evm(code []byte) ([]*big.Int, bool) {
 	slices.Reverse(stack)
 
 	return stack, true // Success
+}
+
+func executeOpcode(pc *int, stack *[]*big.Int, code []byte, opcode OpCode) bool {
+	switch opcode {
+	case Push0:
+		*stack = append(*stack, big.NewInt(0)) // Push 0 onto the stack
+	case Push1, Push2, Push4, Push6, Push10, Push11, Push32:
+		pushX(pc, stack, code, pushOpcodeToBytes[opcode])
+	case Pop:
+		if _, ok := popX(pc, stack, 1); !ok {
+			return false
+		}
+	case Add, Sub, Mul, Div, Mod, Addmod, Mulmod, Exp:
+		if !applyArithmeticOp(opcode, pc, stack) {
+			return false
+		}
+	case Signextend:
+		if !signExtend(pc, stack) {
+			return false
+		}
+	case Sdiv:
+		if !sdiv(pc, stack) {
+			return false
+		}
+	case Smod:
+		if !smod(pc, stack) {
+			return false
+		}
+	case Lt, Gt, Slt, Sgt:
+		if !applyComparisonOp(opcode, pc, stack) {
+			return false
+		}
+	default:
+		return false // Revert on unknown opcode
+	}
+
+	return true
 }
 
 // pushX reads 'size' bytes from the EVM code starting from the current program counter (PC)
@@ -282,6 +292,122 @@ func sdiv(pc *int, stack *[]*big.Int) bool {
 
 	// Apply modulus to keep result within 256 bits
 	result.Mod(result, modulus)
+
+	*stack = append(*stack, result)
+	*pc++
+
+	return true
+}
+
+func smod(pc *int, stack *[]*big.Int) bool {
+	if len(*stack) < 2 {
+		return false
+	}
+
+	a, _ := popLastElement(pc, stack)
+	b, _ := popLastElement(pc, stack)
+
+	if b.Sign() == 0 { // Division by zero
+		*stack = append(*stack, big.NewInt(0))
+		*pc++
+		return true
+	}
+
+	aIsNegative := isNegative(a)
+	bIsNegative := isNegative(b)
+
+	if aIsNegative {
+		a = overflowingNeg(a)
+	}
+
+	if bIsNegative {
+		b = overflowingNeg(b)
+	}
+
+	result := new(big.Int).Mod(a, b)
+
+	// Apply sign
+	if aIsNegative && bIsNegative {
+		result.Neg(result)
+	}
+
+	// Apply modulus to keep result within 256 bits
+	result.Mod(result, modulus)
+
+	*stack = append(*stack, result)
+	*pc++
+
+	return true
+}
+
+func applyComparisonOp(opcode OpCode, pc *int, stack *[]*big.Int) bool {
+	if len(*stack) < 2 {
+		return false
+	}
+
+	// Pop the last two elements from the stack.
+	a, _ := popLastElement(pc, stack)
+	b, _ := popLastElement(pc, stack)
+
+	var result *big.Int
+	switch opcode {
+	case Lt:
+		if a.Cmp(b) < 0 {
+			result = big.NewInt(1)
+		} else {
+			result = big.NewInt(0)
+		}
+	case Gt:
+		if a.Cmp(b) > 0 {
+			result = big.NewInt(1)
+		} else {
+			result = big.NewInt(0)
+		}
+	case Slt:
+		switch {
+		case isNegative(a) && !isNegative(b):
+			result = big.NewInt(1)
+		case !isNegative(a) && isNegative(b):
+			result = big.NewInt(0)
+		case isNegative(a) && isNegative(b):
+			aNeg := overflowingNeg(a)
+			bNeg := overflowingNeg(b)
+			if aNeg.Cmp(bNeg) <= 0 {
+				result = big.NewInt(0)
+			} else {
+				result = big.NewInt(1)
+			}
+		default:
+			if a.Cmp(b) < 0 {
+				result = big.NewInt(1)
+			} else {
+				result = big.NewInt(0)
+			}
+		}
+	case Sgt:
+		switch {
+		case isNegative(a) && !isNegative(b):
+			result = big.NewInt(0)
+		case !isNegative(a) && isNegative(b):
+			result = big.NewInt(1)
+		case isNegative(a) && isNegative(b):
+			aNeg := overflowingNeg(a)
+			bNeg := overflowingNeg(b)
+			if aNeg.Cmp(bNeg) >= 0 {
+				result = big.NewInt(0)
+			} else {
+				result = big.NewInt(1)
+			}
+		default:
+			if a.Cmp(b) > 0 {
+				result = big.NewInt(1)
+			} else {
+				result = big.NewInt(0)
+			}
+		}
+	default:
+		return false
+	}
 
 	*stack = append(*stack, result)
 	*pc++
