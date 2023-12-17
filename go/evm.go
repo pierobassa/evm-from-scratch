@@ -1,6 +1,7 @@
 package evm
 
 import (
+	"fmt"
 	"math/big"
 	"slices"
 )
@@ -20,33 +21,8 @@ func Evm(code []byte) ([]*big.Int, bool) {
 		}
 		pc++
 
-		switch opcode {
-		case Stop:
-			return stack, true // Halt execution
-		case Push0:
-			stack = append(stack, big.NewInt(0)) // Push 0 onto the stack
-		case Push1:
-			pushX(&pc, &stack, code, 1)
-		case Push2:
-			pushX(&pc, &stack, code, 2)
-		case Push4:
-			pushX(&pc, &stack, code, 4)
-		case Push6:
-			pushX(&pc, &stack, code, 6)
-		case Push10:
-			pushX(&pc, &stack, code, 10)
-		case Push11:
-			pushX(&pc, &stack, code, 11)
-		case Push32:
-			pushX(&pc, &stack, code, 32)
-		case Pop:
-			if !popX(&pc, &stack, 1) {
-				return nil, false
-			}
-		case Add, Sub, Mul, Div:
-			if !applyArithmeticOp(opcode, &pc, &stack) {
-				return nil, false
-			}
+		if err := processOpcode(opcode, &pc, &stack, code); err != nil {
+			return nil, false
 		}
 	}
 
@@ -54,6 +30,36 @@ func Evm(code []byte) ([]*big.Int, bool) {
 	slices.Reverse(stack)
 
 	return stack, true // Success
+}
+
+func processOpcode(opcode OpCode, pc *int, stack *[]*big.Int, code []byte) error {
+	switch opcode {
+	case Stop:
+		return nil // Stop execution
+	case Push0:
+		*stack = append(*stack, big.NewInt(0)) // Push 0 onto the stack
+	case Push1, Push2, Push4, Push6, Push10, Push11, Push32:
+		pushX(pc, stack, code, int(opcode-Push1+1))
+	case Pop:
+		if _, ok := popX(pc, stack, 1); !ok {
+			return fmt.Errorf("pop failed")
+		}
+	case Add, Sub, Mul, Div, Mod, Addmod, Mulmod, Exp:
+		if !applyArithmeticOp(opcode, pc, stack) {
+			return fmt.Errorf("arithmetic op failed")
+		}
+	case Signextend:
+		if !signExtend(pc, stack) {
+			return fmt.Errorf("sign extend failed")
+		}
+	case Sdiv:
+		if !sdiv(pc, stack) {
+			return fmt.Errorf("signed division failed")
+		}
+	default:
+		return fmt.Errorf("unknown opcode")
+	}
+	return nil
 }
 
 // pushX reads 'size' bytes from the EVM code starting from the current program counter (PC)
@@ -81,26 +87,54 @@ func pushX(pc *int, stack *[]*big.Int, code []byte, size int) {
 }
 
 // popX pops elements from the stack.
-func popX(pc *int, stack *[]*big.Int, size int) bool {
+func popX(pc *int, stack *[]*big.Int, size int) ([]*big.Int, bool) {
 	if len(*stack) < size {
-		return false
+		return nil, false
 	}
+
+	// Get the last 'size' elements from the stack.
+	elements := (*stack)[len(*stack)-size:]
 
 	// Remove the last 'size' elements from the stack.
 	*stack = (*stack)[:len(*stack)-size]
 	*pc++
-	return true
+
+	return elements, true
 }
 
-// applyArithmeticOp applies arithmetic operations like add, sub,0 mul, div.
+func mod(a, b *big.Int) *big.Int {
+	if b.Sign() == 0 { // Check for division by zero
+		return big.NewInt(0)
+	}
+	return new(big.Int).Mod(a, b)
+}
+
+func div(a, b *big.Int) *big.Int {
+	if b.Sign() == 0 { // Check for division by zero
+		return big.NewInt(0)
+	}
+	return new(big.Int).Div(a, b)
+}
+
+func popLastElement(pc *int, stack *[]*big.Int) (*big.Int, bool) {
+	if len(*stack) < 1 {
+		return nil, false
+	}
+
+	elements, _ := popX(pc, stack, 1)
+
+	return elements[0], true
+}
+
+// applyArithmeticOp applies arithmetic operations like add, sub, mul, div, mod
 func applyArithmeticOp(opcode OpCode, pc *int, stack *[]*big.Int) bool {
 	if len(*stack) < 2 {
 		return false
 	}
 
 	// Pop the last two elements from the stack.
-	a, b := (*stack)[len(*stack)-1], (*stack)[len(*stack)-2]
-	*stack = (*stack)[:len(*stack)-2]
+	a, _ := popLastElement(pc, stack)
+	b, _ := popLastElement(pc, stack)
 
 	var result *big.Int
 	switch opcode {
@@ -111,13 +145,136 @@ func applyArithmeticOp(opcode OpCode, pc *int, stack *[]*big.Int) bool {
 	case Mul:
 		result = new(big.Int).Mul(a, b)
 	case Div:
-		if b.Sign() == 0 { // Check for division by zero
-			result = big.NewInt(0)
-		} else {
-			result = new(big.Int).Div(a, b)
-		}
+		result = div(a, b)
+	case Mod:
+		result = mod(a, b)
+	case Addmod:
+		result = new(big.Int).Add(a, b)
+		modValue, _ := popLastElement(pc, stack) // Get the last element from the stack
+		result = mod(result, modValue)
+	case Mulmod:
+		result = new(big.Int).Mul(a, b)
+		modValue, _ := popLastElement(pc, stack) // Get the last element from the stack
+		result = mod(result, modValue)
+	case Exp:
+		result = new(big.Int).Exp(a, b, nil)
 	default:
 		return false
+	}
+
+	// Apply modulus to keep result within 256 bits
+	result.Mod(result, modulus)
+
+	*stack = append(*stack, result)
+	*pc++
+
+	return true
+}
+
+// fromLittleEndian converts a byte slice from little endian to big endian.
+func fromLittleEndian(bytes []byte) []byte {
+	copyBytes := bytes
+
+	for i := 0; i < len(copyBytes)/2; i++ {
+		copyBytes[i], copyBytes[len(copyBytes)-i-1] = copyBytes[len(copyBytes)-i-1], copyBytes[i]
+	}
+
+	return copyBytes
+}
+
+func signExtend(pc *int, stack *[]*big.Int) bool {
+	if len(*stack) < 2 {
+		return false
+	}
+
+	// Pop the last two elements from the stack.
+	k, _ := popLastElement(pc, stack)
+	x, _ := popLastElement(pc, stack)
+
+	// If k is greater than 31, push x back onto the stack
+	if k.Cmp(big.NewInt(31)) > 0 {
+		*stack = append(*stack, x)
+		*pc++
+
+		return true
+	}
+
+	// Convert x to a byte slice
+	bytes := x.Bytes()
+
+	// Extend to 32 bytes if necessary
+	for len(bytes) < 32 {
+		bytes = append(bytes, 0)
+	}
+
+	// Perform the sign extension
+	byteIndex := int(k.Uint64())
+	signByte := bytes[byteIndex]
+
+	for i := 0; i < 32; i++ {
+		if i > int(k.Uint64()) {
+			if signByte > 0x7f { // Check if the sign bit is set
+				bytes[i] = 0xFF
+			} else {
+				bytes[i] = 0x00
+			}
+		}
+
+	}
+
+	// Convert the byte slice back to big.Int
+	result := new(big.Int).SetBytes(fromLittleEndian(bytes))
+	*stack = append(*stack, result)
+
+	*pc++
+
+	return true
+}
+
+// Helper function to check if the most significant bit is set (negative in two's complement)
+func isNegative(x *big.Int) bool {
+	return x.Bit(255) == 1
+}
+
+// Helper function to negate a big.Int and handle overflow
+func overflowingNeg(x *big.Int) *big.Int {
+	negated := new(big.Int).Neg(x) // Negate x
+
+	// Handle overflow (wrap around within 256 bits)
+	negated.Mod(negated, modulus)
+
+	return negated
+}
+
+func sdiv(pc *int, stack *[]*big.Int) bool {
+	if len(*stack) < 2 {
+		return false
+	}
+
+	a, _ := popLastElement(pc, stack)
+	b, _ := popLastElement(pc, stack)
+
+	if b.Sign() == 0 { // Division by zero
+		*stack = append(*stack, big.NewInt(0))
+		*pc++
+		return true
+	}
+
+	aIsNegative := isNegative(a)
+	bIsNegative := isNegative(b)
+
+	if aIsNegative {
+		a = overflowingNeg(a)
+	}
+	if bIsNegative {
+		b = overflowingNeg(b)
+	}
+
+	result := new(big.Int).Div(a, b)
+
+	// Apply sign
+	if aIsNegative != bIsNegative {
+		result.Neg(result)
 	}
 
 	// Apply modulus to keep result within 256 bits
