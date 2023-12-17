@@ -1,7 +1,6 @@
 package evm
 
 import (
-	"fmt"
 	"math/big"
 	"slices"
 )
@@ -10,6 +9,7 @@ import (
 var modulus = new(big.Int).Exp(big.NewInt(2), big.NewInt(256), nil)
 
 // Evm executes the EVM code and returns the stack and a success indicator.
+// TODO: Reduce cognitive complexity
 func Evm(code []byte) ([]*big.Int, bool) {
 	var stack []*big.Int
 	pc := 0
@@ -21,8 +21,41 @@ func Evm(code []byte) ([]*big.Int, bool) {
 		}
 		pc++
 
-		if err := processOpcode(opcode, &pc, &stack, code); err != nil {
-			return nil, false
+		switch opcode {
+		case Stop:
+			return stack, true // Halt execution
+		case Push0:
+			stack = append(stack, big.NewInt(0)) // Push 0 onto the stack
+		case Push1:
+			pushX(&pc, &stack, code, 1)
+		case Push2:
+			pushX(&pc, &stack, code, 2)
+		case Push4:
+			pushX(&pc, &stack, code, 4)
+		case Push6:
+			pushX(&pc, &stack, code, 6)
+		case Push10:
+			pushX(&pc, &stack, code, 10)
+		case Push11:
+			pushX(&pc, &stack, code, 11)
+		case Push32:
+			pushX(&pc, &stack, code, 32)
+		case Pop:
+			if _, ok := popX(&pc, &stack, 1); !ok {
+				return nil, false
+			}
+		case Add, Sub, Mul, Div, Mod, Addmod, Mulmod, Exp:
+			if !applyArithmeticOp(opcode, &pc, &stack) {
+				return nil, false
+			}
+		case Signextend:
+			if !signExtend(&pc, &stack) {
+				return nil, false
+			}
+		case Sdiv:
+			if !sdiv(&pc, &stack) {
+				return nil, false
+			}
 		}
 	}
 
@@ -30,36 +63,6 @@ func Evm(code []byte) ([]*big.Int, bool) {
 	slices.Reverse(stack)
 
 	return stack, true // Success
-}
-
-func processOpcode(opcode OpCode, pc *int, stack *[]*big.Int, code []byte) error {
-	switch opcode {
-	case Stop:
-		return nil // Stop execution
-	case Push0:
-		*stack = append(*stack, big.NewInt(0)) // Push 0 onto the stack
-	case Push1, Push2, Push4, Push6, Push10, Push11, Push32:
-		pushX(pc, stack, code, int(opcode-Push1+1))
-	case Pop:
-		if _, ok := popX(pc, stack, 1); !ok {
-			return fmt.Errorf("pop failed")
-		}
-	case Add, Sub, Mul, Div, Mod, Addmod, Mulmod, Exp:
-		if !applyArithmeticOp(opcode, pc, stack) {
-			return fmt.Errorf("arithmetic op failed")
-		}
-	case Signextend:
-		if !signExtend(pc, stack) {
-			return fmt.Errorf("sign extend failed")
-		}
-	case Sdiv:
-		if !sdiv(pc, stack) {
-			return fmt.Errorf("signed division failed")
-		}
-	default:
-		return fmt.Errorf("unknown opcode")
-	}
-	return nil
 }
 
 // pushX reads 'size' bytes from the EVM code starting from the current program counter (PC)
