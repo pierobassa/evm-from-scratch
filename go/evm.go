@@ -1,29 +1,30 @@
 package evm
 
 import (
+	"evm-from-scratch-go/opcodes"
 	"math/big"
 	"slices"
 )
 
-// Modulus to wrap big integers to 256 bits.
-var modulus = new(big.Int).Exp(big.NewInt(2), big.NewInt(256), nil)
-
 // Evm executes the EVM code and returns the stack and a success indicator.
+// It takes the EVM code as input and returns the stack and a success indicator.
+// The stack is returned in reverse order, with the top element at the end.
+// The success indicator is true if the execution was successful, false otherwise.
 func Evm(code []byte) ([]*big.Int, bool) {
 	var stack []*big.Int
 	pc := 0
 
 	for pc < len(code) {
-		opcode, err := NewOpCode(code[pc])
+		opcode, err := opcodes.NewOpCode(code[pc])
 
 		if err != nil {
-			return nil, false // Revert on unknown opcode
+			return nil, false // Revert on unknown opcodes
 		}
 
 		pc++
 
-		// Stop execution if the opcode is STOP
-		if opcode == Stop {
+		// Stop execution if the opcodes is STOP
+		if opcode == opcodes.Stop {
 			return stack, true // Halt execution
 		}
 
@@ -38,379 +39,42 @@ func Evm(code []byte) ([]*big.Int, bool) {
 	return stack, true // Success
 }
 
-func executeOpcode(pc *int, stack *[]*big.Int, code []byte, opcode OpCode) bool {
+// executeOpcode executes the opcode and returns true if the execution was successful, false otherwise.
+// It takes the program counter, stack, EVM code, and opcode as input.
+// It executes the opcode and returns true if the execution was successful, false otherwise.
+func executeOpcode(pc *int, stack *[]*big.Int, code []byte, opcode opcodes.OpCode) bool {
 	switch opcode {
-	case Push0:
+	case opcodes.Push0:
 		*stack = append(*stack, big.NewInt(0)) // Push 0 onto the stack
-	case Push1, Push2, Push4, Push6, Push10, Push11, Push32:
-		pushX(pc, stack, code, pushOpcodeToBytes[opcode])
-	case Pop:
-		if _, ok := popX(pc, stack, 1); !ok {
+	case opcodes.Push1, opcodes.Push2, opcodes.Push4, opcodes.Push6, opcodes.Push10, opcodes.Push11, opcodes.Push32:
+		opcodes.PushX(pc, stack, code, opcodes.PushOpcodeToBytes[opcode])
+	case opcodes.Pop:
+		if _, ok := opcodes.PopX(pc, stack, 1); !ok {
 			return false
 		}
-	case Add, Sub, Mul, Div, Mod, Addmod, Mulmod, Exp:
-		if !applyArithmeticOp(opcode, pc, stack) {
+	case opcodes.Add, opcodes.Sub, opcodes.Mul, opcodes.Div, opcodes.Mod, opcodes.Addmod, opcodes.Mulmod, opcodes.Exp:
+		if !opcodes.ApplyArithmeticOp(opcode, pc, stack) {
 			return false
 		}
-	case Signextend:
-		if !signExtend(pc, stack) {
+	case opcodes.Signextend:
+		if !opcodes.SignedExtend(pc, stack) {
 			return false
 		}
-	case Sdiv:
-		if !sdiv(pc, stack) {
+	case opcodes.Sdiv:
+		if !opcodes.SignedDivision(pc, stack) {
 			return false
 		}
-	case Smod:
-		if !smod(pc, stack) {
+	case opcodes.Smod:
+		if !opcodes.SignedModulus(pc, stack) {
 			return false
 		}
-	case Lt, Gt, Slt, Sgt:
-		if !applyComparisonOp(opcode, pc, stack) {
+	case opcodes.Lt, opcodes.Gt, opcodes.Slt, opcodes.Sgt:
+		if !opcodes.ApplyComparisonOp(opcode, pc, stack) {
 			return false
 		}
 	default:
-		return false // Revert on unknown opcode
+		return false // Revert on unknown opcodes
 	}
-
-	return true
-}
-
-// pushX reads 'size' bytes from the EVM code starting from the current program counter (PC)
-// and pushes them as a big integer onto the EVM stack.
-//
-// Arguments:
-// pc    - Pointer to the program counter which indicates the current position in the code.
-// stack - Pointer to the EVM stack where all computational values are stored.
-// code  - Byte slice representing the EVM code being executed.
-// size  - Number of bytes to read from the code and push onto the stack.
-//
-// If the bytes to be read exceed the bounds of the code slice, no action is performed.
-// After successfully reading the bytes and pushing them onto the stack, the program counter
-// is updated to the position after the read bytes.
-func pushX(pc *int, stack *[]*big.Int, code []byte, size int) {
-	end := *pc + size
-	if end <= len(code) {
-		value := new(big.Int).SetBytes(code[*pc:end])
-
-		// Prepend the value to the stack.
-		*stack = append(*stack, value)
-
-		*pc = end
-	}
-}
-
-// popX pops elements from the stack.
-func popX(pc *int, stack *[]*big.Int, size int) ([]*big.Int, bool) {
-	if len(*stack) < size {
-		return nil, false
-	}
-
-	// Get the last 'size' elements from the stack.
-	elements := (*stack)[len(*stack)-size:]
-
-	// Remove the last 'size' elements from the stack.
-	*stack = (*stack)[:len(*stack)-size]
-	*pc++
-
-	return elements, true
-}
-
-func mod(a, b *big.Int) *big.Int {
-	if b.Sign() == 0 { // Check for division by zero
-		return big.NewInt(0)
-	}
-	return new(big.Int).Mod(a, b)
-}
-
-func div(a, b *big.Int) *big.Int {
-	if b.Sign() == 0 { // Check for division by zero
-		return big.NewInt(0)
-	}
-	return new(big.Int).Div(a, b)
-}
-
-func popLastElement(pc *int, stack *[]*big.Int) (*big.Int, bool) {
-	if len(*stack) < 1 {
-		return nil, false
-	}
-
-	elements, _ := popX(pc, stack, 1)
-
-	return elements[0], true
-}
-
-// applyArithmeticOp applies arithmetic operations like add, sub, mul, div, mod
-func applyArithmeticOp(opcode OpCode, pc *int, stack *[]*big.Int) bool {
-	if len(*stack) < 2 {
-		return false
-	}
-
-	// Pop the last two elements from the stack.
-	a, _ := popLastElement(pc, stack)
-	b, _ := popLastElement(pc, stack)
-
-	var result *big.Int
-	switch opcode {
-	case Add:
-		result = new(big.Int).Add(a, b)
-	case Sub:
-		result = new(big.Int).Sub(a, b)
-	case Mul:
-		result = new(big.Int).Mul(a, b)
-	case Div:
-		result = div(a, b)
-	case Mod:
-		result = mod(a, b)
-	case Addmod:
-		result = new(big.Int).Add(a, b)
-		modValue, _ := popLastElement(pc, stack) // Get the last element from the stack
-		result = mod(result, modValue)
-	case Mulmod:
-		result = new(big.Int).Mul(a, b)
-		modValue, _ := popLastElement(pc, stack) // Get the last element from the stack
-		result = mod(result, modValue)
-	case Exp:
-		result = new(big.Int).Exp(a, b, nil)
-	default:
-		return false
-	}
-
-	// Apply modulus to keep result within 256 bits
-	result.Mod(result, modulus)
-
-	*stack = append(*stack, result)
-	*pc++
-
-	return true
-}
-
-// fromLittleEndian converts a byte slice from little endian to big endian.
-func fromLittleEndian(bytes []byte) []byte {
-	copyBytes := bytes
-
-	for i := 0; i < len(copyBytes)/2; i++ {
-		copyBytes[i], copyBytes[len(copyBytes)-i-1] = copyBytes[len(copyBytes)-i-1], copyBytes[i]
-	}
-
-	return copyBytes
-}
-
-func signExtend(pc *int, stack *[]*big.Int) bool {
-	if len(*stack) < 2 {
-		return false
-	}
-
-	// Pop the last two elements from the stack.
-	k, _ := popLastElement(pc, stack)
-	x, _ := popLastElement(pc, stack)
-
-	// If k is greater than 31, push x back onto the stack
-	if k.Cmp(big.NewInt(31)) > 0 {
-		*stack = append(*stack, x)
-		*pc++
-
-		return true
-	}
-
-	// Convert x to a byte slice
-	bytes := x.Bytes()
-
-	// Extend to 32 bytes if necessary
-	for len(bytes) < 32 {
-		bytes = append(bytes, 0)
-	}
-
-	// Perform the sign extension
-	byteIndex := int(k.Uint64())
-	signByte := bytes[byteIndex]
-
-	for i := 0; i < 32; i++ {
-		if i > int(k.Uint64()) {
-			if signByte > 0x7f { // Check if the sign bit is set
-				bytes[i] = 0xFF
-			} else {
-				bytes[i] = 0x00
-			}
-		}
-
-	}
-
-	// Convert the byte slice back to big.Int
-	result := new(big.Int).SetBytes(fromLittleEndian(bytes))
-	*stack = append(*stack, result)
-
-	*pc++
-
-	return true
-}
-
-// Helper function to check if the most significant bit is set (negative in two's complement)
-func isNegative(x *big.Int) bool {
-	return x.Bit(255) == 1
-}
-
-// Helper function to negate a big.Int and handle overflow
-func overflowingNeg(x *big.Int) *big.Int {
-	negated := new(big.Int).Neg(x) // Negate x
-
-	// Handle overflow (wrap around within 256 bits)
-	negated.Mod(negated, modulus)
-
-	return negated
-}
-
-func sdiv(pc *int, stack *[]*big.Int) bool {
-	if len(*stack) < 2 {
-		return false
-	}
-
-	a, _ := popLastElement(pc, stack)
-	b, _ := popLastElement(pc, stack)
-
-	if b.Sign() == 0 { // Division by zero
-		*stack = append(*stack, big.NewInt(0))
-		*pc++
-		return true
-	}
-
-	aIsNegative := isNegative(a)
-	bIsNegative := isNegative(b)
-
-	if aIsNegative {
-		a = overflowingNeg(a)
-	}
-	if bIsNegative {
-		b = overflowingNeg(b)
-	}
-
-	result := new(big.Int).Div(a, b)
-
-	// Apply sign
-	if aIsNegative != bIsNegative {
-		result.Neg(result)
-	}
-
-	// Apply modulus to keep result within 256 bits
-	result.Mod(result, modulus)
-
-	*stack = append(*stack, result)
-	*pc++
-
-	return true
-}
-
-func smod(pc *int, stack *[]*big.Int) bool {
-	if len(*stack) < 2 {
-		return false
-	}
-
-	a, _ := popLastElement(pc, stack)
-	b, _ := popLastElement(pc, stack)
-
-	if b.Sign() == 0 { // Division by zero
-		*stack = append(*stack, big.NewInt(0))
-		*pc++
-		return true
-	}
-
-	aIsNegative := isNegative(a)
-	bIsNegative := isNegative(b)
-
-	if aIsNegative {
-		a = overflowingNeg(a)
-	}
-
-	if bIsNegative {
-		b = overflowingNeg(b)
-	}
-
-	result := new(big.Int).Mod(a, b)
-
-	// Apply sign
-	if aIsNegative && bIsNegative {
-		result.Neg(result)
-	}
-
-	// Apply modulus to keep result within 256 bits
-	result.Mod(result, modulus)
-
-	*stack = append(*stack, result)
-	*pc++
-
-	return true
-}
-
-func applyComparisonOp(opcode OpCode, pc *int, stack *[]*big.Int) bool {
-	if len(*stack) < 2 {
-		return false
-	}
-
-	// Pop the last two elements from the stack.
-	a, _ := popLastElement(pc, stack)
-	b, _ := popLastElement(pc, stack)
-
-	var result *big.Int
-	switch opcode {
-	case Lt:
-		if a.Cmp(b) < 0 {
-			result = big.NewInt(1)
-		} else {
-			result = big.NewInt(0)
-		}
-	case Gt:
-		if a.Cmp(b) > 0 {
-			result = big.NewInt(1)
-		} else {
-			result = big.NewInt(0)
-		}
-	case Slt:
-		switch {
-		case isNegative(a) && !isNegative(b):
-			result = big.NewInt(1)
-		case !isNegative(a) && isNegative(b):
-			result = big.NewInt(0)
-		case isNegative(a) && isNegative(b):
-			aNeg := overflowingNeg(a)
-			bNeg := overflowingNeg(b)
-			if aNeg.Cmp(bNeg) <= 0 {
-				result = big.NewInt(0)
-			} else {
-				result = big.NewInt(1)
-			}
-		default:
-			if a.Cmp(b) < 0 {
-				result = big.NewInt(1)
-			} else {
-				result = big.NewInt(0)
-			}
-		}
-	case Sgt:
-		switch {
-		case isNegative(a) && !isNegative(b):
-			result = big.NewInt(0)
-		case !isNegative(a) && isNegative(b):
-			result = big.NewInt(1)
-		case isNegative(a) && isNegative(b):
-			aNeg := overflowingNeg(a)
-			bNeg := overflowingNeg(b)
-			if aNeg.Cmp(bNeg) >= 0 {
-				result = big.NewInt(0)
-			} else {
-				result = big.NewInt(1)
-			}
-		default:
-			if a.Cmp(b) > 0 {
-				result = big.NewInt(1)
-			} else {
-				result = big.NewInt(0)
-			}
-		}
-	default:
-		return false
-	}
-
-	*stack = append(*stack, result)
-	*pc++
 
 	return true
 }
